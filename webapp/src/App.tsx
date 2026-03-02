@@ -14,13 +14,14 @@ import SettingsPage from '@/components/SettingsPage';
 import SecurityDevicesPage from '@/components/SecurityDevicesPage';
 import AdminPage from '@/components/AdminPage';
 import HelpPage from '@/components/HelpPage';
-import ImportExportPage from '@/components/ImportExportPage';
+import ImportPage from '@/components/ImportPage';
 import {
   changeMasterPassword,
   createFolder,
   createCipher,
   createAuthedFetch,
   createInvite,
+  importCiphers,
   createSend,
   deleteAllInvites,
   deleteCipher,
@@ -58,6 +59,7 @@ import {
 } from '@/lib/api';
 import { base64ToBytes, decryptBw, decryptStr, hkdf } from '@/lib/crypto';
 import { t } from '@/lib/i18n';
+import type { CiphersImportPayload } from '@/lib/api';
 import type { AppPhase, AuthorizedDevice, Cipher, Folder, Profile, Send, SendDraft, SessionState, ToastMessage, VaultDraft } from '@/lib/types';
 
 interface PendingTotp {
@@ -70,6 +72,135 @@ type JwtUnsafeReason = 'missing' | 'default' | 'too_short';
 
 const SEND_KEY_SALT = 'bitwarden-send';
 const SEND_KEY_PURPOSE = 'send';
+const IMPORT_ROUTE = '/help/import-export';
+const IMPORT_ROUTE_ALIASES = new Set(['/tools/import', '/tools/import-export', '/tools/import-data', '/import', '/import-export']);
+
+function asText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+function buildEmptyImportDraft(type: number): VaultDraft {
+  return {
+    type,
+    favorite: false,
+    name: '',
+    folderId: '',
+    notes: '',
+    reprompt: false,
+    loginUsername: '',
+    loginPassword: '',
+    loginTotp: '',
+    loginUris: [''],
+    loginFido2Credentials: [],
+    cardholderName: '',
+    cardNumber: '',
+    cardBrand: '',
+    cardExpMonth: '',
+    cardExpYear: '',
+    cardCode: '',
+    identTitle: '',
+    identFirstName: '',
+    identMiddleName: '',
+    identLastName: '',
+    identUsername: '',
+    identCompany: '',
+    identSsn: '',
+    identPassportNumber: '',
+    identLicenseNumber: '',
+    identEmail: '',
+    identPhone: '',
+    identAddress1: '',
+    identAddress2: '',
+    identAddress3: '',
+    identCity: '',
+    identState: '',
+    identPostalCode: '',
+    identCountry: '',
+    sshPrivateKey: '',
+    sshPublicKey: '',
+    sshFingerprint: '',
+    customFields: [],
+  };
+}
+
+function importCipherToDraft(cipher: Record<string, unknown>, folderId: string | null): VaultDraft {
+  const type = Number(cipher.type || 1) || 1;
+  const draft = buildEmptyImportDraft(type);
+  draft.name = asText(cipher.name).trim() || 'Untitled';
+  draft.notes = asText(cipher.notes);
+  draft.favorite = !!cipher.favorite;
+  draft.reprompt = Number(cipher.reprompt || 0) === 1;
+  draft.folderId = folderId || '';
+
+  const customFieldsRaw = Array.isArray(cipher.fields) ? cipher.fields : [];
+  draft.customFields = customFieldsRaw
+    .map((raw) => {
+      const field = (raw || {}) as Record<string, unknown>;
+      const label = asText(field.name).trim();
+      if (!label) return null;
+      const parsedType = Number(field.type ?? 0);
+      const fieldType = parsedType === 1 || parsedType === 2 || parsedType === 3 ? (parsedType as 1 | 2 | 3) : 0;
+      return {
+        type: fieldType,
+        label,
+        value: asText(field.value),
+      };
+    })
+    .filter((x): x is VaultDraft['customFields'][number] => !!x);
+
+  if (type === 1) {
+    const login = (cipher.login || {}) as Record<string, unknown>;
+    draft.loginUsername = asText(login.username);
+    draft.loginPassword = asText(login.password);
+    draft.loginTotp = asText(login.totp);
+    draft.loginFido2Credentials = Array.isArray(login.fido2Credentials)
+      ? login.fido2Credentials
+          .filter((credential): credential is Record<string, unknown> => !!credential && typeof credential === 'object')
+          .map((credential) => ({ ...credential }))
+      : [];
+    const urisRaw = Array.isArray(login.uris) ? login.uris : [];
+    const uris = urisRaw
+      .map((u) => asText((u as Record<string, unknown>)?.uri).trim())
+      .filter((u) => !!u);
+    draft.loginUris = uris.length ? uris : [''];
+  } else if (type === 3) {
+    const card = (cipher.card || {}) as Record<string, unknown>;
+    draft.cardholderName = asText(card.cardholderName);
+    draft.cardNumber = asText(card.number);
+    draft.cardBrand = asText(card.brand);
+    draft.cardExpMonth = asText(card.expMonth);
+    draft.cardExpYear = asText(card.expYear);
+    draft.cardCode = asText(card.code);
+  } else if (type === 4) {
+    const identity = (cipher.identity || {}) as Record<string, unknown>;
+    draft.identTitle = asText(identity.title);
+    draft.identFirstName = asText(identity.firstName);
+    draft.identMiddleName = asText(identity.middleName);
+    draft.identLastName = asText(identity.lastName);
+    draft.identUsername = asText(identity.username);
+    draft.identCompany = asText(identity.company);
+    draft.identSsn = asText(identity.ssn);
+    draft.identPassportNumber = asText(identity.passportNumber);
+    draft.identLicenseNumber = asText(identity.licenseNumber);
+    draft.identEmail = asText(identity.email);
+    draft.identPhone = asText(identity.phone);
+    draft.identAddress1 = asText(identity.address1);
+    draft.identAddress2 = asText(identity.address2);
+    draft.identAddress3 = asText(identity.address3);
+    draft.identCity = asText(identity.city);
+    draft.identState = asText(identity.state);
+    draft.identPostalCode = asText(identity.postalCode);
+    draft.identCountry = asText(identity.country);
+  } else if (type === 5) {
+    const sshKey = (cipher.sshKey || {}) as Record<string, unknown>;
+    draft.sshPrivateKey = asText(sshKey.privateKey);
+    draft.sshPublicKey = asText(sshKey.publicKey);
+    draft.sshFingerprint = asText(sshKey.fingerprint);
+  }
+
+  return draft;
+}
 
 function buildPublicSendUrl(origin: string, accessId: string, keyPart: string): string {
   return `${origin}/#/send/${accessId}/${keyPart}`;
@@ -470,6 +601,9 @@ export default function App() {
                 decUsername: await decryptField(cipher.login.username || '', itemEnc, itemMac),
                 decPassword: await decryptField(cipher.login.password || '', itemEnc, itemMac),
                 decTotp: await decryptField(cipher.login.totp || '', itemEnc, itemMac),
+                fido2Credentials: Array.isArray(cipher.login.fido2Credentials)
+                  ? cipher.login.fido2Credentials.map((credential) => ({ ...credential }))
+                  : null,
                 uris: await Promise.all(
                   (cipher.login.uris || []).map(async (u) => ({
                     ...u,
@@ -818,16 +952,125 @@ export default function App() {
     }
   }
 
+  async function handleImportAction(
+    payload: CiphersImportPayload,
+    options: { folderMode: 'original' | 'none' | 'target'; targetFolderId: string | null }
+  ) {
+    if (!session?.symEncKey || !session?.symMacKey) throw new Error('Vault key unavailable');
+
+    const mode = options.folderMode || 'original';
+    const targetFolderId = (options.targetFolderId || '').trim() || null;
+    const folderIdByCipherIndex = new Map<number, string>();
+    if (mode === 'original') {
+      const folderIdByImportIndex = new Map<number, string>();
+      const folderIdByLegacyId = new Map<string, string>();
+      const folderIdByName = new Map<string, string>();
+      const createdFolderIdByName = new Map<string, string>();
+      for (let i = 0; i < payload.folders.length; i++) {
+        const folderRaw = (payload.folders[i] || {}) as Record<string, unknown>;
+        const name = String(folderRaw.name || '').trim();
+        if (!name) continue;
+        let folderId = createdFolderIdByName.get(name) || null;
+        if (!folderId) {
+          const created = await createFolder(authedFetch, name);
+          folderId = created.id;
+          createdFolderIdByName.set(name, folderId);
+        }
+        folderIdByImportIndex.set(i, folderId);
+        folderIdByName.set(name, folderId);
+        const legacyId = String(folderRaw.id || '').trim();
+        if (legacyId) folderIdByLegacyId.set(legacyId, folderId);
+      }
+      for (const relation of payload.folderRelationships || []) {
+        const cipherIndex = Number(relation?.key);
+        const folderIndex = Number(relation?.value);
+        if (!Number.isFinite(cipherIndex) || !Number.isFinite(folderIndex)) continue;
+        const folderId = folderIdByImportIndex.get(folderIndex);
+        if (folderId) folderIdByCipherIndex.set(cipherIndex, folderId);
+      }
+      for (let i = 0; i < payload.ciphers.length; i++) {
+        if (folderIdByCipherIndex.has(i)) continue;
+        const raw = (payload.ciphers[i] || {}) as Record<string, unknown>;
+        const rawFolderId = String(raw.folderId || '').trim();
+        if (rawFolderId && folderIdByLegacyId.has(rawFolderId)) {
+          folderIdByCipherIndex.set(i, folderIdByLegacyId.get(rawFolderId)!);
+          continue;
+        }
+        const rawFolderName = String(raw.folder || '').trim();
+        if (rawFolderName && folderIdByName.has(rawFolderName)) {
+          folderIdByCipherIndex.set(i, folderIdByName.get(rawFolderName)!);
+        }
+      }
+    } else if (mode === 'target' && targetFolderId) {
+      for (let i = 0; i < payload.ciphers.length; i++) {
+        folderIdByCipherIndex.set(i, targetFolderId);
+      }
+    }
+
+    const createdCipherIdsByIndex = new Map<number, string>();
+    for (let i = 0; i < payload.ciphers.length; i++) {
+      const raw = (payload.ciphers[i] || {}) as Record<string, unknown>;
+      const draft = importCipherToDraft(raw, null);
+      const created = await createCipher(authedFetch, session, draft);
+      createdCipherIdsByIndex.set(i, created.id);
+    }
+
+    const moveIdsByFolderId = new Map<string, string[]>();
+    for (const [index, folderId] of folderIdByCipherIndex.entries()) {
+      const cipherId = createdCipherIdsByIndex.get(index);
+      if (!cipherId || !folderId) continue;
+      const group = moveIdsByFolderId.get(folderId) || [];
+      group.push(cipherId);
+      moveIdsByFolderId.set(folderId, group);
+    }
+    for (const [folderId, ids] of moveIdsByFolderId.entries()) {
+      await bulkMoveCiphers(authedFetch, ids, folderId);
+    }
+
+    await Promise.all([ciphersQuery.refetch(), foldersQuery.refetch()]);
+  }
+
+  async function handleImportEncryptedRawAction(
+    payload: CiphersImportPayload,
+    options: { folderMode: 'original' | 'none' | 'target'; targetFolderId: string | null }
+  ) {
+    const mode = options.folderMode || 'original';
+    const targetFolderId = (options.targetFolderId || '').trim() || null;
+    const nextPayload: CiphersImportPayload = {
+      ciphers: payload.ciphers.map((raw) => ({ ...(raw as Record<string, unknown>) })),
+      folders: mode === 'original' ? payload.folders : [],
+      folderRelationships: mode === 'original' ? payload.folderRelationships : [],
+    };
+    if (mode === 'none') {
+      for (const raw of nextPayload.ciphers) (raw as Record<string, unknown>).folderId = null;
+    } else if (mode === 'target' && targetFolderId) {
+      for (const raw of nextPayload.ciphers) (raw as Record<string, unknown>).folderId = targetFolderId;
+    }
+
+    await importCiphers(authedFetch, nextPayload);
+    await Promise.all([ciphersQuery.refetch(), foldersQuery.refetch()]);
+  }
+
   const hashPathRaw = typeof window !== 'undefined' ? window.location.hash || '' : '';
   const hashPath = hashPathRaw.startsWith('#') ? hashPathRaw.slice(1) : hashPathRaw;
+  const hashPathOnly = String(hashPath || '').split('?')[0].split('#')[0];
+  const normalizedHashPath = `/${hashPathOnly.replace(/^\/+/, '').replace(/\/+$/, '')}`.replace(/^\/$/, '/');
+  const isImportHashRoute = IMPORT_ROUTE_ALIASES.has(normalizedHashPath);
   const effectiveLocation = hashPath.startsWith('/send/') || hashPath === '/recover-2fa' ? hashPath : location;
   const publicSendMatch = effectiveLocation.match(/^\/send\/([^/]+)(?:\/([^/]+))?\/?$/i);
   const isRecoverTwoFactorRoute = effectiveLocation === '/recover-2fa';
   const isPublicSendRoute = !!publicSendMatch;
+  const isImportRoute = location === IMPORT_ROUTE || IMPORT_ROUTE_ALIASES.has(location);
 
   useEffect(() => {
     if (phase === 'app' && location === '/' && !isPublicSendRoute) navigate('/vault');
   }, [phase, location, isPublicSendRoute, navigate]);
+
+  useEffect(() => {
+    if (phase === 'app' && isImportHashRoute && location !== IMPORT_ROUTE) {
+      navigate(IMPORT_ROUTE);
+    }
+  }, [phase, isImportHashRoute, location, navigate]);
 
   if (jwtWarning) {
     return <JwtWarningPage reason={jwtWarning.reason} minLength={jwtWarning.minLength} />;
@@ -984,7 +1227,7 @@ export default function App() {
                 <Cloud size={16} />
                 <span>{t('nav_backup_strategy')}</span>
               </Link>
-              <Link href="/help/import-export" className={`side-link ${location === '/help/import-export' ? 'active' : ''}`}>
+              <Link href={IMPORT_ROUTE} className={`side-link ${isImportRoute ? 'active' : ''}`}>
                 <ArrowUpDown size={14} />
                 <span>{t('nav_import_export')}</span>
               </Link>
@@ -1132,8 +1375,59 @@ export default function App() {
                     }}
                   />
                 </Route>
-                <Route path="/help/import-export">
-                  <ImportExportPage />
+                <Route path={IMPORT_ROUTE}>
+                  <ImportPage
+                    onImport={handleImportAction}
+                    onImportEncryptedRaw={handleImportEncryptedRawAction}
+                    accountKeys={session?.symEncKey && session?.symMacKey ? { encB64: session.symEncKey, macB64: session.symMacKey } : null}
+                    onNotify={pushToast}
+                    folders={decryptedFolders}
+                  />
+                </Route>
+                <Route path="/tools/import">
+                  <ImportPage
+                    onImport={handleImportAction}
+                    onImportEncryptedRaw={handleImportEncryptedRawAction}
+                    accountKeys={session?.symEncKey && session?.symMacKey ? { encB64: session.symEncKey, macB64: session.symMacKey } : null}
+                    onNotify={pushToast}
+                    folders={decryptedFolders}
+                  />
+                </Route>
+                <Route path="/tools/import-export">
+                  <ImportPage
+                    onImport={handleImportAction}
+                    onImportEncryptedRaw={handleImportEncryptedRawAction}
+                    accountKeys={session?.symEncKey && session?.symMacKey ? { encB64: session.symEncKey, macB64: session.symMacKey } : null}
+                    onNotify={pushToast}
+                    folders={decryptedFolders}
+                  />
+                </Route>
+                <Route path="/tools/import-data">
+                  <ImportPage
+                    onImport={handleImportAction}
+                    onImportEncryptedRaw={handleImportEncryptedRawAction}
+                    accountKeys={session?.symEncKey && session?.symMacKey ? { encB64: session.symEncKey, macB64: session.symMacKey } : null}
+                    onNotify={pushToast}
+                    folders={decryptedFolders}
+                  />
+                </Route>
+                <Route path="/import">
+                  <ImportPage
+                    onImport={handleImportAction}
+                    onImportEncryptedRaw={handleImportEncryptedRawAction}
+                    accountKeys={session?.symEncKey && session?.symMacKey ? { encB64: session.symEncKey, macB64: session.symMacKey } : null}
+                    onNotify={pushToast}
+                    folders={decryptedFolders}
+                  />
+                </Route>
+                <Route path="/import-export">
+                  <ImportPage
+                    onImport={handleImportAction}
+                    onImportEncryptedRaw={handleImportEncryptedRawAction}
+                    accountKeys={session?.symEncKey && session?.symMacKey ? { encB64: session.symEncKey, macB64: session.symMacKey } : null}
+                    onNotify={pushToast}
+                    folders={decryptedFolders}
+                  />
                 </Route>
                 <Route path="/help">
                   <HelpPage />

@@ -158,6 +158,7 @@ function createEmptyDraft(type: number): VaultDraft {
     loginPassword: '',
     loginTotp: '',
     loginUris: [''],
+    loginFido2Credentials: [],
     cardholderName: '',
     cardNumber: '',
     cardBrand: '',
@@ -203,6 +204,9 @@ function draftFromCipher(cipher: Cipher): VaultDraft {
     draft.loginPassword = cipher.login.decPassword || '';
     draft.loginTotp = cipher.login.decTotp || '';
     draft.loginUris = (cipher.login.uris || []).map((x) => x.decUri || x.uri || '');
+    draft.loginFido2Credentials = Array.isArray(cipher.login.fido2Credentials)
+      ? cipher.login.fido2Credentials.map((credential) => ({ ...credential }))
+      : [];
     if (!draft.loginUris.length) draft.loginUris = [''];
   }
   if (cipher.card) {
@@ -262,6 +266,16 @@ function formatHistoryTime(value: string | null | undefined): string {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return value;
   return date.toLocaleString();
+}
+
+function firstPasskeyCreationTime(cipher: Cipher | null): string | null {
+  const credentials = cipher?.login?.fido2Credentials;
+  if (!Array.isArray(credentials) || credentials.length === 0) return null;
+  for (const credential of credentials) {
+    const raw = String(credential?.creationDate || '').trim();
+    if (raw) return raw;
+  }
+  return null;
 }
 
 const TOTP_PERIOD_SECONDS = 30;
@@ -419,6 +433,7 @@ export default function VaultPage(props: VaultPageProps) {
     () => props.ciphers.find((x) => x.id === selectedCipherId) || null,
     [props.ciphers, selectedCipherId]
   );
+  const passkeyCreatedAt = firstPasskeyCreationTime(selectedCipher);
 
   useEffect(() => {
     const raw = selectedCipher?.login?.decTotp || '';
@@ -1170,6 +1185,15 @@ function folderName(id: string | null | undefined): string {
                           <Clipboard size={14} className="btn-icon" /> {t('txt_copy')}
                         </button>
                       </div>
+                    </div>
+                  )}
+                  {!!passkeyCreatedAt && (
+                    <div className="kv-row">
+                      <span className="kv-label">{t('txt_passkey')}</span>
+                      <div className="kv-main">
+                        <strong>{t('txt_passkey_created_at_value', { value: formatHistoryTime(passkeyCreatedAt) })}</strong>
+                      </div>
+                      <div className="kv-actions" />
                     </div>
                   )}
                 </div>

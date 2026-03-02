@@ -326,6 +326,8 @@ const messages: Record<Locale, Record<string, string>> = {
     txt_totp_is_enabled_for_this_account: "TOTP is enabled for this account.",
     txt_totp_secret: "TOTP Secret",
     txt_totp_verify_failed: "TOTP verify failed",
+    txt_passkey: "Passkey",
+    txt_passkey_created_at_value: "Created at {value}",
     txt_trash: "Trash",
     txt_trust_this_device_for_30_days: "Trust this device for 30 days",
     txt_trusted_until: "Trusted Until",
@@ -728,6 +730,8 @@ const zhCNOverrides: Record<string, string> = {
 };
 
 zhCNOverrides.txt_lock = '\u9501\u5b9a';
+zhCNOverrides.txt_passkey = 'Passkey';
+zhCNOverrides.txt_passkey_created_at_value = '\u521b\u5efa\u4e8e {value}';
 
 messages['zh-CN'] = { ...messages.en, ...zhCNOverrides };
 

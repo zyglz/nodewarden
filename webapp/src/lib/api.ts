@@ -307,13 +307,16 @@ export async function getFolders(authedFetch: (input: string, init?: RequestInit
 export async function createFolder(
   authedFetch: (input: string, init?: RequestInit) => Promise<Response>,
   name: string
-): Promise<void> {
+): Promise<{ id: string; name?: string | null }> {
   const resp = await authedFetch('/api/folders', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   });
   if (!resp.ok) throw new Error('Create folder failed');
+  const body = await parseJson<{ id?: string; name?: string | null }>(resp);
+  if (!body?.id) throw new Error('Create folder failed');
+  return { id: body.id, name: body.name ?? null };
 }
 
 export async function getCiphers(authedFetch: (input: string, init?: RequestInit) => Promise<Response>): Promise<Cipher[]> {
@@ -321,6 +324,24 @@ export async function getCiphers(authedFetch: (input: string, init?: RequestInit
   if (!resp.ok) throw new Error('Failed to load ciphers');
   const body = await parseJson<ListResponse<Cipher>>(resp);
   return body?.data || [];
+}
+
+export interface CiphersImportPayload {
+  ciphers: Array<Record<string, unknown>>;
+  folders: Array<{ name: string }>;
+  folderRelationships: Array<{ key: number; value: number }>;
+}
+
+export async function importCiphers(
+  authedFetch: (input: string, init?: RequestInit) => Promise<Response>,
+  payload: CiphersImportPayload
+): Promise<void> {
+  const resp = await authedFetch('/api/ciphers/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) throw new Error(await parseErrorMessage(resp, 'Import failed'));
 }
 
 export async function getSends(authedFetch: (input: string, init?: RequestInit) => Promise<Response>): Promise<Send[]> {
@@ -571,6 +592,50 @@ async function encryptUris(uris: string[], enc: Uint8Array, mac: Uint8Array): Pr
   return out;
 }
 
+function asFidoString(value: unknown, fallback = ''): string {
+  const normalized = String(value ?? '').trim();
+  return normalized || fallback;
+}
+
+function asNullableFidoString(value: unknown): string | null {
+  const normalized = String(value ?? '').trim();
+  return normalized || null;
+}
+
+function toIsoDateOrNow(value: unknown): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) return new Date().toISOString();
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime())) return new Date().toISOString();
+  return parsed.toISOString();
+}
+
+function normalizeFido2Credentials(
+  credentials: Array<Record<string, unknown>> | null | undefined
+): Array<Record<string, unknown>> | null {
+  if (!Array.isArray(credentials) || credentials.length === 0) return null;
+  const out: Array<Record<string, unknown>> = [];
+  for (const credential of credentials) {
+    if (!credential || typeof credential !== 'object') continue;
+    out.push({
+      credentialId: asFidoString(credential.credentialId),
+      keyType: asFidoString(credential.keyType, 'public-key'),
+      keyAlgorithm: asFidoString(credential.keyAlgorithm, 'ECDSA'),
+      keyCurve: asFidoString(credential.keyCurve, 'P-256'),
+      keyValue: asFidoString(credential.keyValue),
+      rpId: asFidoString(credential.rpId),
+      rpName: asNullableFidoString(credential.rpName),
+      userHandle: asNullableFidoString(credential.userHandle),
+      userName: asNullableFidoString(credential.userName),
+      userDisplayName: asNullableFidoString(credential.userDisplayName),
+      counter: asFidoString(credential.counter, '0'),
+      discoverable: asFidoString(credential.discoverable, 'false'),
+      creationDate: toIsoDateOrNow(credential.creationDate),
+    });
+  }
+  return out.length ? out : null;
+}
+
 async function getCipherKeys(cipher: Cipher | null, userEnc: Uint8Array, userMac: Uint8Array): Promise<{ enc: Uint8Array; mac: Uint8Array; key: string | null }> {
   if (cipher?.key) {
     try {
@@ -587,7 +652,7 @@ export async function createCipher(
   authedFetch: (input: string, init?: RequestInit) => Promise<Response>,
   session: SessionState,
   draft: VaultDraft
-): Promise<void> {
+): Promise<{ id: string }> {
   if (!session.symEncKey || !session.symMacKey) throw new Error('Vault key unavailable');
   const enc = base64ToBytes(session.symEncKey);
   const mac = base64ToBytes(session.symMacKey);
@@ -613,6 +678,7 @@ export async function createCipher(
       username: await encryptTextValue(draft.loginUsername, enc, mac),
       password: await encryptTextValue(draft.loginPassword, enc, mac),
       totp: await encryptTextValue(draft.loginTotp, enc, mac),
+      fido2Credentials: normalizeFido2Credentials(draft.loginFido2Credentials),
       uris: await encryptUris(draft.loginUris || [], enc, mac),
     };
   } else if (type === 3) {
@@ -661,6 +727,9 @@ export async function createCipher(
     body: JSON.stringify(payload),
   });
   if (!resp.ok) throw new Error('Create item failed');
+  const body = await parseJson<{ id?: string }>(resp);
+  if (!body?.id) throw new Error('Create item failed');
+  return { id: body.id };
 }
 
 export async function updateCipher(
@@ -693,10 +762,15 @@ export async function updateCipher(
   };
 
   if (type === 1) {
+    const existingFido2 =
+      cipher.login && Array.isArray((cipher.login as any).fido2Credentials)
+        ? (cipher.login as any).fido2Credentials
+        : null;
     payload.login = {
       username: await encryptTextValue(draft.loginUsername, keys.enc, keys.mac),
       password: await encryptTextValue(draft.loginPassword, keys.enc, keys.mac),
       totp: await encryptTextValue(draft.loginTotp, keys.enc, keys.mac),
+      fido2Credentials: normalizeFido2Credentials(existingFido2),
       uris: await encryptUris(draft.loginUris || [], keys.enc, keys.mac),
     };
   } else if (type === 3) {
